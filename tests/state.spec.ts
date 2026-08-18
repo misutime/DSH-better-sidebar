@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   activateTab, allLeaves, BOTTOM_DEFAULT, BOTTOM_MIN, closeTab, createSidebarStore,
   insertLeafAt, makeDefaultState, migrateBottomTabs, moveTab, moveTabToEdge, openDiffTab,
-  openTabInActivePane, patchTab, resizeSplit, resizeSplitIn, sanitizeState, setBottomHeight,
+  openTabInActivePane, patchTab, resizeSplit, resizeSplitIn, sanitizeState, setBottomHeight, setTreeWidth,
   splitPane, tabOpenIn, toggleBottomPanel, toggleExpanded, togglePanel,
   type SidebarState, type SidebarTab, type SplitNode,
 } from '../src/client/state.ts'
@@ -55,12 +55,32 @@ describe('sidebar state', () => {
     })
     const right = (valid?.splits as { tabs: SidebarTab[] }).tabs
     expect(right).toHaveLength(1)
-    // Migrated: editor home tab (no path), tree pinned open, prior meta kept.
-    expect(right[0]).toMatchObject({ id: 'ex-right', type: 'editor', title: 'Files', meta: { treeOpen: true, treeWidth: 300 } })
+    // Migrated: editor home tab (no path), tree pinned open. The old
+    // per-tab width is discarded because width now belongs to global layout.
+    expect(right[0]).toMatchObject({ id: 'ex-right', type: 'editor', title: 'Files', meta: { treeOpen: true } })
+    expect(right[0]!.meta).not.toHaveProperty('treeWidth')
     expect(right[0]!.path).toBeUndefined()
     const bottom = (valid?.bottomSplits as { tabs: SidebarTab[] }).tabs
     expect(bottom).toHaveLength(1)
     expect(bottom[0]).toMatchObject({ id: 'ex-bottom', type: 'editor', title: 'Files', meta: { treeOpen: true } })
+  })
+
+  it('sanitizeState removes legacy treeWidth from regular editor tabs', () => {
+    const valid = sanitizeState({
+      panelOpen: true,
+      width: 400,
+      nextTerminal: 1,
+      activePane: 'pane:1',
+      expanded: [],
+      splits: {
+        kind: 'leaf',
+        id: 'pane:1',
+        active: 'editor:1',
+        tabs: [{ id: 'editor:1', type: 'editor', title: 'a.ts', path: '/a.ts', meta: { treeOpen: true, treeWidth: 360 } }],
+      },
+    })
+    const tab = (valid?.splits as { tabs: SidebarTab[] }).tabs[0]!
+    expect(tab.meta).toEqual({ treeOpen: true })
   })
 
   it('opens tabs into the active pane and dedupes by id (safety net)', () => {
@@ -378,6 +398,12 @@ describe('sidebar state', () => {
     s = togglePanel(s)
     expect(s.panelOpen).toBe(false)
     expect(s.bottomOpen).toBe(true)
+  })
+
+  it('setTreeWidth clamps to the global editor split contract', () => {
+    expect(setTreeWidth(state(), 50).treeWidth).toBe(160)
+    expect(setTreeWidth(state(), 999).treeWidth).toBe(480)
+    expect(setTreeWidth(state(), 340.6).treeWidth).toBe(341)
   })
 
   it('setBottomHeight clamps to the contract range', () => {
@@ -776,6 +802,35 @@ describe('v0.12.0 store additions', () => {
     const g = globalThis as Record<string, unknown>
     delete g.window
     delete g.localStorage
+  })
+
+  it('shares the editor tree width across sessions and persists it in the global record', () => {
+    const g = globalThis as Record<string, unknown>
+    const records = new Map<string, string>()
+    g.localStorage = {
+      getItem: (key: string) => records.get(key) ?? null,
+      setItem: (key: string, value: string) => { records.set(key, value) },
+    }
+    try {
+      const store = createSidebarStore()
+      store.setSession('session-a')
+      store.reduce(state => setTreeWidth(state, 340))
+      expect(store.getSnapshot().state?.treeWidth).toBe(340)
+      expect(JSON.parse(records.get('dsh-sidebar:v1:global')!).treeWidth).toBe(340)
+      // A different session receives the same working-surface width, while
+      // its content remains independently seeded.
+      store.setSession('session-b')
+      expect(store.getSnapshot().state?.treeWidth).toBe(340)
+      store.reduce(state => setTreeWidth(state, 420))
+      store.setSession('session-a')
+      expect(store.getSnapshot().state?.treeWidth).toBe(420)
+      // A fresh store also restores the one global layout record.
+      const restored = createSidebarStore()
+      restored.setSession('session-a')
+      expect(restored.getSnapshot().state?.treeWidth).toBe(420)
+    } finally {
+      delete g.localStorage
+    }
   })
 
   describe('store.reduceFor (targeted opens, v0.12.0)', () => {

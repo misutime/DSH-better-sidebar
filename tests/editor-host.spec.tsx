@@ -27,6 +27,9 @@ function setup(): {
   ctx: Context
   homeTab: () => SidebarTab
 } {
+  // Each host test starts from the default global editor split width; the
+  // production store intentionally persists this value across store instances.
+  window.localStorage.removeItem('dsh-sidebar:v1:global')
   const store = createSidebarStore()
   const service = createBetterSidebarService(store)
   // The openTab path needs a registered editor descriptor (dedupe by path).
@@ -105,6 +108,21 @@ describe('EditorHost (files window)', () => {
       // No cwd: the embedded tree renders its no-session placeholder
       // instead of touching the network.
       expect(html).toContain('Select a conversation')
+    } finally {
+      unmount()
+    }
+  })
+
+  it('renders the file tree before the editor area', () => {
+    const { store, ctx, homeTab } = setup()
+    const { container, unmount } = mountHost(ctx, store, homeTab)
+    try {
+      const handle = container.querySelector('[role="separator"]')!
+      const dock = handle.parentElement!
+      // The dock is the first child of the body: tree on the left, editor on
+      // the right. The resize handle is therefore on the dock's right edge.
+      expect(dock.parentElement?.firstElementChild).toBe(dock)
+      expect(dock.parentElement?.lastElementChild).not.toBe(dock)
     } finally {
       unmount()
     }
@@ -215,7 +233,7 @@ describe('EditorHost (files window)', () => {
     }
   })
 
-  it('dragging the panel edge resizes the dock and persists meta.treeWidth on release', () => {
+  it('dragging the panel edge resizes the dock and persists the GLOBAL tree width on release', () => {
     const { store, ctx, homeTab } = setup()
     const { container, unmount } = mountHost(ctx, store, homeTab)
     try {
@@ -224,17 +242,41 @@ describe('EditorHost (files window)', () => {
       // The dock starts at the default width.
       const dock = handle.parentElement!
       expect(dock.style.width).toBe('240px')
-      // Drag the left edge LEFT by 100px → the right-docked panel widens.
-      // Pointer capture keeps move/up on the handle (jsdom: MouseEvent with
-      // pointer* type names; setPointerCapture is absent and skipped).
+      // The tree docks LEFT now; dragging the handle RIGHT widens it. Pointer
+      // capture keeps move/up on the handle (jsdom: MouseEvent with pointer*
+      // type names; setPointerCapture is absent and skipped).
       act(() => {
-        handle.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 300 }))
-        handle.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 200 }))
+        handle.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 200 }))
+        handle.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 300 }))
       })
       expect(dock.style.width).toBe('340px')
-      // Release: the drag state clears and the width persists on the tab.
-      act(() => { handle.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 200 })) })
-      expect(homeTab().meta).toEqual({ treeOpen: true, treeWidth: 340 })
+      // Release: drag state clears and the width persists GLOBALLY (shared by
+      // every session), not per-tab meta.
+      act(() => { handle.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 300 })) })
+      expect(store.getSnapshot().state?.treeWidth).toBe(340)
+      // treeWidth no longer lives on the tab's meta (only the open flag does).
+      expect(homeTab().meta).toEqual({ treeOpen: true })
+    } finally {
+      unmount()
+    }
+  })
+
+  it('cancelling a resize discards the preview instead of committing the cancel coordinate', () => {
+    const { store, ctx, homeTab } = setup()
+    const { container, unmount } = mountHost(ctx, store, homeTab)
+    try {
+      const handle = container.querySelector('[role="separator"]')!
+      const dock = handle.parentElement!
+      act(() => {
+        handle.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 200 }))
+        handle.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 320 }))
+      })
+      expect(dock.style.width).toBe('360px')
+      // Browsers may report clientX=0 on pointercancel; it must not collapse
+      // the persisted width to the minimum.
+      act(() => { handle.dispatchEvent(new MouseEvent('pointercancel', { bubbles: true, clientX: 0 })) })
+      expect(dock.style.width).toBe('240px')
+      expect(store.getSnapshot().state?.treeWidth).toBe(240)
     } finally {
       unmount()
     }

@@ -811,7 +811,8 @@
 }
 
 /* Merged mode (the editorExplorer pref): the header's path input replaces
-   the plain title, and a toggleable file tree docks at the tab's right edge. */
+   the plain title, and a toggleable file tree docks at the tab's LEFT edge;
+   its width is global and the right edge is the resize handle. */
 .editorPathInput {
   flex: 1;
   min-width: 0;
@@ -850,24 +851,25 @@
   flex-direction: column;
 }
 
-/* The docked file tree: the wrapper owns the (drag-adjustable) width and
-   the hairline separation; the resize handle is a wider invisible strip on
-   its left edge with a hover affordance. */
+/* The docked file tree (on the LEFT, editor to the right): the wrapper owns
+   the (drag-adjustable) width and the hairline separation; the resize handle
+   is a wider invisible strip on its RIGHT edge (the editor's left edge) with
+   a hover affordance. */
 .editorTreeDock {
   position: relative;
   flex: none;
   min-height: 0;
   display: flex;
-  border-left: 1px solid var(--dsw-alias-border-l1);
+  border-right: 1px solid var(--dsw-alias-border-l1);
 }
 
 .editorTreeResize {
   position: absolute;
   top: 0;
   bottom: 0;
-  /* Inside the dock (left edge): pointer capture on the handle keeps the
-     drag alive even when the pointer leaves the strip. */
-  left: 0;
+  /* Inside the dock (right edge, abutting the editor): pointer capture on the
+     handle keeps the drag alive even when the pointer leaves the strip. */
+  right: 0;
   width: 6px;
   cursor: col-resize;
   touch-action: none;

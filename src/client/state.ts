@@ -65,6 +65,9 @@ export type SplitNode = SidebarLeaf | SidebarSplit
 export interface SidebarState {
   panelOpen: boolean
   width: number
+  /** The editor file-window's tree/editor split width (px), GLOBAL — every
+   *  session shares the same value via {@link GlobalSidebarLayout#treeWidth}. */
+  treeWidth: number
   /** The pane receiving newly opened tabs (last pane the user touched).
    *  Pane ids are globally unique across BOTH trees (shared uid counter), so
    *  one field resolves into either tree — see {@link treeOf}. */
@@ -100,6 +103,14 @@ export const TAB_MAX_WIDTH = 160
  * bound is the viewport, enforced by {@link setBottomHeight}). */
 export const BOTTOM_MIN = 120
 export const BOTTOM_DEFAULT = 220
+/** The editor file-window's tree-panel width contract: the docked file tree
+ *  vs the editor/preview split width, shared GLOBALLY across every session
+ *  (like the panel width) rather than per tab. The 160–480 range is
+ *  upstream's documented contract — the upper bound keeps the editor side
+ *  usable inside a 640px panel. */
+export const TREE_WIDTH_MIN = 160
+export const TREE_WIDTH_MAX = 480
+export const TREE_WIDTH_DEFAULT = 240
 
 /**
  * The GLOBAL panel geometry, shared across every session (a single
@@ -114,6 +125,10 @@ export interface GlobalSidebarLayout {
   panelOpen: boolean
   /** Panel width in px (clamped to the contract range on load). */
   width: number
+  /** The editor file-window's tree/editor split width in px (clamped to the
+   *  contract range on load). Shared by every session — a local preference
+   *  about the working surface, not about any one conversation. */
+  treeWidth: number
   bottomOpen: boolean
   /** Bottom panel height in px (clamped to the contract range on load). */
   bottomHeight: number
@@ -142,6 +157,7 @@ function splitState(state: SidebarState): { layout: GlobalSidebarLayout; content
     layout: {
       panelOpen: state.panelOpen,
       width: state.width,
+      treeWidth: state.treeWidth,
       bottomOpen: state.bottomOpen,
       bottomHeight: state.bottomHeight,
       bottomOpenedOnce: state.bottomOpenedOnce,
@@ -239,6 +255,7 @@ export function makeDefaultState(width = PANEL_DEFAULT, panelOpen = true, seed: 
   return {
     panelOpen,
     width,
+    treeWidth: TREE_WIDTH_DEFAULT,
     activePane: leaf.id,
     nextTerminal: 1,
     nextBrowser: 1,
@@ -889,6 +906,18 @@ export function setWidth(state: SidebarState, width: number): SidebarState {
   return { ...state, width: Math.min(max, Math.max(PANEL_MIN, Math.round(width))) }
 }
 
+/** Clamp the editor tree/editor split width into the contract range. */
+export function clampTreeWidth(value: number): number {
+  return Math.min(TREE_WIDTH_MAX, Math.max(TREE_WIDTH_MIN, Math.round(value)))
+}
+
+/** Set the editor file-window's tree/editor split width (px), clamped to the
+ *  contract range. GLOBAL via {@link GlobalSidebarLayout#treeWidth}: every
+ *  session shares the same tree width. */
+export function setTreeWidth(state: SidebarState, treeWidth: number): SidebarState {
+  return { ...state, treeWidth: clampTreeWidth(treeWidth) }
+}
+
 /** Set the bottom panel height (clamped to the contract range). The upper
  * bound leaves the center column (the agent output area) at least PANEL_MIN
  * tall — without the cap the bottom panel could swallow the whole viewport
@@ -1085,9 +1114,15 @@ export function sanitizeLayout(parsed: unknown): GlobalSidebarLayout | undefined
   const rawHeight = typeof record.bottomHeight === 'number' && Number.isFinite(record.bottomHeight)
     ? record.bottomHeight
     : BOTTOM_DEFAULT
+  const rawTreeWidth = typeof record.treeWidth === 'number' && Number.isFinite(record.treeWidth)
+    ? record.treeWidth
+    : TREE_WIDTH_DEFAULT
   return {
     panelOpen: record.panelOpen,
     width: Math.max(PANEL_MIN, Math.min(record.width, maxWidth)),
+    // The editor tree split width (global); a missing value on an OLDER
+    // record defaults to the contract default, like the bottom fields.
+    treeWidth: Math.min(TREE_WIDTH_MAX, Math.max(TREE_WIDTH_MIN, Math.round(rawTreeWidth))),
     bottomOpen: record.bottomOpen === true,
     bottomHeight: Math.min(bottomCap, Math.max(BOTTOM_MIN, Math.round(rawHeight))),
     // An older state never expanded the bottom panel: defaulting to false
@@ -1121,6 +1156,7 @@ export function makeDefaultLayout(prefs: SidebarPrefs): GlobalSidebarLayout {
   return {
     panelOpen: openByDefault,
     width,
+    treeWidth: TREE_WIDTH_DEFAULT,
     bottomOpen: false,
     bottomHeight: BOTTOM_DEFAULT,
     bottomOpenedOnce: false,
@@ -1192,6 +1228,15 @@ export function sanitizeState(parsed: unknown): SidebarState | undefined {
   return synthState(layout, content)
 }
 
+/** Remove the pre-global-layout treeWidth field from legacy editor tabs.
+ * treeOpen remains per-tab; the split width is now owned by the global
+ * layout. Non-editor/plugin metadata is left untouched. */
+function sanitizeTabMeta(type: string, meta: unknown): unknown {
+  if (type !== 'editor' || meta === null || typeof meta !== 'object' || Array.isArray(meta)) return meta
+  const { treeWidth: _legacyTreeWidth, ...rest } = meta as Record<string, unknown>
+  return Object.keys(rest).length === 0 ? undefined : rest
+}
+
 /**
  * One tree node id, deduplicated against the ids already seen in this
  * state. Duplicates are exactly the pre-seeding counter-reset corruption
@@ -1238,28 +1283,30 @@ function sanitizeNode(node: unknown, seen: Set<string>, reid: Map<string, string
       if (typeof candidate.type !== 'string') return undefined
       // The standalone explorer tab type merged INTO the editor (the single
       // files window): a persisted explorer tab reopens as an editor home
-      // tab — no path, tree panel open (an existing meta object survives).
+      // tab — no path, tree panel open. The old per-tab treeWidth is
+      // intentionally discarded: the dock width now belongs to the global
+      // layout, while this migrated tab retains only its per-tab open/closed
+      // flag.
       if (candidate.type === 'explorer') {
-        const meta = candidate.meta !== null && typeof candidate.meta === 'object' && !Array.isArray(candidate.meta)
-          ? candidate.meta as Record<string, unknown>
-          : undefined
         tabs.push({
           id: candidate.id,
           type: 'editor',
           title: 'Files',
-          meta: { treeOpen: true, ...meta },
+          meta: { treeOpen: true },
         })
         continue
       }
       // `meta` is plugin-owned JSON-serializable state (v0.12.0+): the
       // persisted value already went through JSON.parse, so it is inherently
-      // serializable — carry it through verbatim (absent on older states).
+      // serializable. Built-in editor tabs additionally drop the obsolete
+      // per-tab treeWidth while retaining treeOpen and other metadata.
+      const meta = sanitizeTabMeta(candidate.type, candidate.meta)
       tabs.push({
         id: candidate.id,
         type: candidate.type,
         title: candidate.title,
         ...(typeof candidate.path === 'string' ? { path: candidate.path } : {}),
-        ...(candidate.meta !== undefined ? { meta: candidate.meta } : {}),
+        ...(meta !== undefined ? { meta } : {}),
       })
     }
     const active = typeof record.active === 'string' ? record.active : null
@@ -1373,6 +1420,7 @@ export class SidebarStore {
     const oldLayout = this.ensureGlobalLayout()
     if (layout.panelOpen !== oldLayout.panelOpen
       || layout.width !== oldLayout.width
+      || layout.treeWidth !== oldLayout.treeWidth
       || layout.bottomOpen !== oldLayout.bottomOpen
       || layout.bottomHeight !== oldLayout.bottomHeight
       || layout.bottomOpenedOnce !== oldLayout.bottomOpenedOnce) {
