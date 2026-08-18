@@ -27,12 +27,35 @@ export function contentText(content: unknown): string | undefined {
   return parts.length > 0 ? parts.join('\n') : undefined
 }
 
-/** The live status of one subagent card (both fields optional). */
+/** Provider/model identity observed in a session's history tail. */
+export interface ModelIdentity {
+  provider: string
+  model: string
+}
+
+/** The live status of one subagent card (all fields optional). */
 export interface LastActivity {
   /** The latest assembled assistant text output in the tail. */
   text?: string
   /** The latest tool call in the tail. */
   tool?: { name: string; args: string }
+  /** The latest request/response provider and model identity in the tail. */
+  model?: ModelIdentity
+}
+
+/** Human-readable provider/model label for compact sidebar rows. */
+export function formatModel(identity: ModelIdentity): string {
+  return identity.provider === '' ? identity.model : `${identity.provider}/${identity.model}`
+}
+
+function modelIdentity(value: unknown): ModelIdentity | undefined {
+  if (value === null || typeof value !== 'object') return undefined
+  const candidate = value as { provider?: unknown; model?: unknown }
+  if (typeof candidate.model !== 'string' || candidate.model === '') return undefined
+  return {
+    provider: typeof candidate.provider === 'string' ? candidate.provider : '',
+    model: candidate.model,
+  }
 }
 
 /**
@@ -46,12 +69,22 @@ export interface LastActivity {
 export function lastActivity(entries: SidebarHistoryEntry[]): LastActivity {
   let text: string | undefined
   let tool: { name: string; args: string } | undefined
+  let model: ModelIdentity | undefined
   for (const entry of entries) {
     const { type, data } = entry.event
     if (type === 'assistant/message') {
-      const message = data.message as { content?: unknown } | undefined
+      const message = data.message as { content?: unknown; source?: unknown } | undefined
       const extracted = contentText(message?.content)
       if (extracted !== undefined) text = extracted
+      // The assistant source is the authoritative model that produced this
+      // response, including when a session switched models between turns.
+      model = modelIdentity(message?.source) ?? model
+    } else if (type === 'request/header') {
+      // A running session may not have a completed assistant message yet.
+      // Keep its effective request config as the fallback until a response
+      // provenance arrives.
+      const header = data.header as { config?: unknown } | undefined
+      model = modelIdentity(header?.config) ?? model
     } else if (type === 'tool/call') {
       tool = {
         name: typeof data.name === 'string' ? data.name : 'tool',
@@ -59,9 +92,10 @@ export function lastActivity(entries: SidebarHistoryEntry[]): LastActivity {
       }
     }
   }
-  if (text === undefined && tool === undefined) return {}
+  if (text === undefined && tool === undefined && model === undefined) return {}
   return {
     ...(text === undefined ? {} : { text }),
     ...(tool === undefined ? {} : { tool }),
+    ...(model === undefined ? {} : { model }),
   }
 }

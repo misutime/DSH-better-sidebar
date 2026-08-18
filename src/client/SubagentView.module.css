@@ -142,6 +142,14 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
+.subagentModel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--dsw-font-xxxs-11);
+  color: var(--dsw-alias-label-secondary);
+}
+
 /* ── Live lines (running cards only) ──────────────────────────────────── */
 
 .subagentLive {

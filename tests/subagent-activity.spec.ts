@@ -46,6 +46,23 @@ describe('subagent activity summary parser', () => {
     ])).toEqual({ text: 'ok' })
   })
 
+  it('extracts the latest provider/model from request headers and assistant provenance', () => {
+    expect(lastActivity([
+      entry('request/header', { header: { config: { provider: 'deepseek', model: 'old-model' } } }),
+      entry('assistant/message', {
+        turn: 1,
+        step: 1,
+        message: {
+          content: [{ type: 'text', text: 'ok' }],
+          source: { kind: 'model', provider: 'openai', model: 'new-model' },
+        },
+      }),
+    ])).toEqual({
+      text: 'ok',
+      model: { provider: 'openai', model: 'new-model' },
+    })
+  })
+
   it('lastActivity ignores lifecycle events, chunks, and text-less messages', () => {
     const live = lastActivity([
       entry('turn/end', { turn: 1, reason: 'success' }),

@@ -5,8 +5,8 @@
  * Covers attach/detach, live switching, dictionary parity, and placeholder
  * interpolation.
  */
-import { afterEach, describe, expect, it } from 'vitest'
-import { LOCALE_NS, attachLocale, en, isZh, relativeTime, t, zh } from '../src/client/locales.ts'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { LOCALE_NS, attachLocale, elapsedTime, en, isZh, relativeTime, t, zh } from '../src/client/locales.ts'
 
 /** Minimal structural fake of the DSH LocaleService face the sidebar uses. */
 class FakeLocale {
@@ -34,6 +34,7 @@ function stubNavigatorLanguage(lang: string | undefined): void {
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   attachLocale(undefined)
   stubNavigatorLanguage(undefined)
 })
@@ -97,6 +98,22 @@ describe('locales (DSH i18n following)', () => {
     expect(relativeTime(new Date().toISOString())).toBe('刚刚')
     locale.switchTo('en')
     expect(relativeTime(new Date().toISOString())).toBe('just now')
+  })
+
+  it('formats refresh age with exact units instead of a fuzzy just-now label', () => {
+    vi.useFakeTimers()
+    const now = new Date('2026-01-01T00:00:00.000Z')
+    vi.setSystemTime(now)
+    const at = (seconds: number): string => new Date(now.getTime() - seconds * 1000).toISOString()
+    const locale = new FakeLocale()
+    attachLocale(locale)
+    locale.switchTo('zh')
+    expect(elapsedTime(at(0))).toBe('0 秒前')
+    expect(elapsedTime(at(65))).toBe('1 分钟前')
+    expect(elapsedTime(at(3_700))).toBe('1 小时前')
+    expect(elapsedTime(at(172_800))).toBe('2 天前')
+    locale.switchTo('en')
+    expect(elapsedTime(at(65))).toBe('1 min ago')
   })
 
   it('registers a namespace distinct from DSH ui-sidebar\'s own \'sidebar\'', () => {

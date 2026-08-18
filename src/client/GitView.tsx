@@ -16,7 +16,7 @@ import {
 import type { GitLogEntry, GitStatusEntry, GitStatusResult, SessionScope } from './api.ts'
 import { api } from './api.ts'
 import { relativeTo } from './paths.ts'
-import { relativeTime, t } from './locales.ts'
+import { elapsedTime, relativeTime, t } from './locales.ts'
 import type { SidebarTab } from './state.ts'
 import css from './sidebar.module.css'
 
@@ -105,6 +105,10 @@ export function GitView(props: {
   /** Whether the history was fully paged (a batch shorter than LOG_BATCH). */
   const [logEnded, setLogEnded] = useState(false)
   const [logLoadingMore, setLogLoadingMore] = useState(false)
+  /** Wall-clock time of the most recent successful data refresh. */
+  const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null)
+  /** Re-render the relative-time label while the Git page is visible. */
+  const [, setRefreshClock] = useState(0)
   /** Keep the loaded history window size available to the poller without
    * restarting its timer whenever a page is appended. */
   const logEntriesRef = useRef<GitLogEntry[]>([])
@@ -139,6 +143,7 @@ export function GitView(props: {
       logEntriesRef.current = logResult
       setLogEntries(logResult)
       setLogEnded(logResult.length < historyCount)
+      setLastRefreshAt(Date.now())
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -147,6 +152,12 @@ export function GitView(props: {
   }, [scope.sessionId, scope.cwd])
 
   useEffect(() => { void refresh() }, [refresh])
+
+  useEffect(() => {
+    if (!visible || lastRefreshAt === null) return
+    const timer = window.setInterval(() => { setRefreshClock(value => value + 1) }, 1_000)
+    return () => { window.clearInterval(timer) }
+  }, [visible, lastRefreshAt])
 
   /**
    * Auto-refresh body — fetches status, branches, and the currently loaded
@@ -181,6 +192,7 @@ export function GitView(props: {
         setLogEnded(logResult.length < historyCount)
       }
       setError(null)
+      setLastRefreshAt(Date.now())
     } catch (reason) {
       // Aborted polls are expected on hide/unmount — never surface them.
       if (controller.signal.aborted) return
@@ -383,6 +395,14 @@ export function GitView(props: {
           {(status?.branch ?? '') !== '' && <option value={status!.branch}>{status!.branch}</option>}
           {branchNames.filter(name => name !== status?.branch).map(name => <option key={name} value={name}>{name}</option>)}
         </select>
+        {lastRefreshAt !== null && (
+          <span
+            className={css.gitLastRefresh}
+            title={t('gitLastRefresh', { time: new Date(lastRefreshAt).toLocaleString() })}
+          >
+            {t('gitLastRefresh', { time: elapsedTime(new Date(lastRefreshAt).toISOString()) })}
+          </span>
+        )}
         <button
           type="button"
           className={css.iconButton}

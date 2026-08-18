@@ -40,7 +40,7 @@ import {
   countSubagentDescendants,
   rootAncestor,
 } from './subagent-detect.ts'
-import { lastActivity } from './subagent-activity.ts'
+import { formatModel, lastActivity, type ModelIdentity } from './subagent-activity.ts'
 import {
   collectTreeJobs,
   formatJobDuration,
@@ -156,10 +156,12 @@ function SubagentLiveLines(props: {
   childSessionId: string
   mode: SidebarSubagentAddress['mode']
   running: boolean
+  model?: ModelIdentity
+  onModel: (sessionId: string, model: ModelIdentity) => void
   /** The page is visible (active tab + open panel): skip polling otherwise. */
   active: boolean
 }) {
-  const { ctx, parentSessionId, childSessionId, mode, running, active } = props
+  const { ctx, parentSessionId, childSessionId, mode, running, model, onModel, active } = props
   const [live, setLive] = useState<ReturnType<typeof lastActivity>>({})
   const controllerRef = useRef<AbortController | undefined>(undefined)
   const address = useMemo(
@@ -177,11 +179,13 @@ function SubagentLiveLines(props: {
         controller.signal,
       )
       if (!response.result.ok) return
-      setLive(lastActivity(response.result.value.events))
+      const next = lastActivity(response.result.value.events)
+       setLive(next)
+       if (next.model !== undefined) onModel(childSessionId, next.model)
     } catch {
       // Aborted by a newer pull or a wire failure: keep the last known lines.
     }
-  }, [ctx, address])
+  }, [ctx, address, onModel, childSessionId])
 
   useEffect(() => {
     if (!active) return
@@ -193,13 +197,15 @@ function SubagentLiveLines(props: {
 
   useEffect(() => () => { controllerRef.current?.abort() }, [])
 
-  if (!running) return null
-  if (live.text === undefined && live.tool === undefined) {
-    return <span className={css.subagentLive}>{t('subagentThinking')}</span>
-  }
+  if (!running && model === undefined) return null
+  const hasLiveActivity = live.text !== undefined || live.tool !== undefined
   return (
     <>
-      {live.tool !== undefined && (
+      {model !== undefined && (
+        <span className={css.subagentModel}>{t('subagentModel', { model: formatModel(model) })}</span>
+      )}
+      {running && !hasLiveActivity && <span className={css.subagentLive}>{t('subagentThinking')}</span>}
+      {running && live.tool !== undefined && (
         <span className={css.subagentLive}>
           <span className={css.subagentLiveTool}>{live.tool.name}</span>
           {live.tool.args !== '' && (
@@ -207,7 +213,7 @@ function SubagentLiveLines(props: {
           )}
         </span>
       )}
-      {live.text !== undefined && (
+      {running && live.text !== undefined && (
         <span className={css.subagentLiveText}>{flatten(live.text)}</span>
       )}
     </>
@@ -227,12 +233,14 @@ interface RowsProps {
   ctx: Context
   openChild: (address: SidebarSubagentAddress) => void
   refresh: (parentSessionId: string) => void
+  models: Readonly<Record<string, ModelIdentity>>
+  onModel: (sessionId: string, model: ModelIdentity) => void
 }
 
 /** Render one topology level; branches are always expanded (lazy catalogs). */
 function CatalogRows({
   parentSessionId, catalog, catalogs, byId, level, currentSessionId, active, ctx,
-  openChild, refresh,
+  openChild, refresh, models, onModel,
 }: RowsProps) {
   const emptyLoading = catalog?.state === 'loading' && catalog.entries.length === 0
   return (
@@ -320,6 +328,8 @@ function CatalogRows({
                   childSessionId={entry.id}
                   mode={entry.mode}
                   running={entry.activity === 'running'}
+                   model={models[entry.id]}
+                   onModel={onModel}
                   active={active}
                 />
               </span>
@@ -346,6 +356,8 @@ function CatalogRows({
                       ctx={ctx}
                       openChild={openChild}
                       refresh={refresh}
+                       models={models}
+                       onModel={onModel}
                     />
                   )}
               </div>
@@ -459,10 +471,11 @@ function JobsSection(props: {
   byId: SidebarSessionList['byId']
   jobsBySession: SidebarSessionList['jobsBySession']
   rootId: string | undefined
+  models: Readonly<Record<string, ModelIdentity>>
   /** The page is visible (active tab + open panel): skip polling otherwise. */
   active: boolean
 }) {
-  const { byId, jobsBySession, rootId, active } = props
+  const { byId, jobsBySession, rootId, models, active } = props
   const rows = useMemo(
     () => orderJobs(collectTreeJobs(byId, jobsBySession, rootId)),
     [byId, jobsBySession, rootId],
@@ -550,6 +563,9 @@ function JobsSection(props: {
               : (job.finishedAt ?? job.startedAt) - job.startedAt
             const secondary = [
               ...(multiOwner ? [row.ownerTitle] : []),
+              ...(models[row.ownerSessionId] !== undefined
+                ? [t('subagentModel', { model: formatModel(models[row.ownerSessionId]!) })]
+                : []),
               jobStatusLabel(job.status, t),
               ...(job.detail !== undefined && job.detail !== '' ? [job.detail] : []),
               formatJobDuration(elapsed, t),
@@ -645,6 +661,49 @@ export function SubagentView(props: {
   const rootId = useMemo(() => rootAncestor(byId, sessionId), [byId, sessionId])
   const rootCatalog = rootId === undefined ? undefined : catalogs[rootId]
   const rootSummary = rootId === undefined ? undefined : byId[rootId]
+  const [models, setModels] = useState<Record<string, ModelIdentity>>({})
+  const onModel = useCallback((id: string, model: ModelIdentity): void => {
+    setModels(current => {
+      const previous = current[id]
+      if (previous?.provider === model.provider && previous?.model === model.model) return current
+      return { ...current, [id]: model }
+    })
+  }, [])
+
+  // The root is an ordinary session rather than a subagent address. Read its
+  // history through the ordinary sessions API so jobs owned by the main agent
+  // can use the same model cache as child-agent rows.
+  useEffect(() => {
+    const history = ctx.connection.api.sessions?.history
+    if (!active || rootId === undefined || history === undefined) return
+    let disposed = false
+    let controller: AbortController | undefined
+    const load = async (): Promise<void> => {
+      controller?.abort()
+      controller = new AbortController()
+      try {
+        const response = await history({ sessionId: rootId, maxMessages: 12 }, controller.signal)
+        if (disposed || controller.signal.aborted || !response.result.ok) return
+        const model = lastActivity(response.result.value.events).model
+        if (model !== undefined) onModel(rootId, model)
+      } catch {
+        // A hidden/disconnected page keeps the last known model label.
+      }
+    }
+    void load()
+    if (rootSummary?.running === true) {
+      const timer = window.setInterval(() => { void load() }, POLL_MS)
+      return () => {
+        disposed = true
+        window.clearInterval(timer)
+        controller?.abort()
+      }
+    }
+    return () => {
+      disposed = true
+      controller?.abort()
+    }
+  }, [active, ctx, onModel, rootId, rootSummary?.running])
 
   /** Catalog owners currently consuming live membership updates. */
   const observedRef = useRef(new Set<string>())
@@ -823,6 +882,9 @@ export function SubagentView(props: {
                 <span className={css.subagentSecondary}>
                   {`${t('subagentMainAgent')} · ${rootSummary.running === true ? t('subagentRunning') : t('subagentInactive')}`}
                 </span>
+                {models[rootId] !== undefined && (
+                  <span className={css.subagentModel}>{t('subagentModel', { model: formatModel(models[rootId]!) })}</span>
+                )}
               </span>
             </div>
           )}
@@ -843,6 +905,8 @@ export function SubagentView(props: {
                   ctx={ctx}
                   openChild={openChild}
                   refresh={refresh}
+                       models={models}
+                       onModel={onModel}
                 />
               )}
             </div>
@@ -858,6 +922,7 @@ export function SubagentView(props: {
           byId={byId}
           jobsBySession={list.jobsBySession}
           rootId={rootId}
+          models={models}
           active={active}
         />
       </div>

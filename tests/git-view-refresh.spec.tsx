@@ -66,6 +66,7 @@ describe('GitView automatic refresh', () => {
 
     expect(container.textContent).toContain('Old commit')
     expect(container.textContent).not.toContain('New commit')
+    expect(container.querySelector('[class*="gitLastRefresh"]')).not.toBeNull()
 
     await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
 
