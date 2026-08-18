@@ -156,8 +156,12 @@ export function GitView(props: {
         const historyCount = Math.max(LOG_BATCH, logEntriesRef.current.length)
         const requestCount = logEndedRef.current ? historyCount + 1 : historyCount
         const entries = await api.gitLog(scope, requestCount, 0)
+        if (generation !== scopeGenerationRef.current) return
         const ended = logEndedRef.current ? entries.length <= historyCount : entries.length < historyCount
-        return { entries: entries.slice(0, historyCount), ended }
+        const window = entries.slice(0, historyCount)
+        logEntriesRef.current = window
+        setLogEntries(window)
+        updateLogEnded(ended)
       }),
     ])
     if (generation !== scopeGenerationRef.current) return
@@ -167,11 +171,7 @@ export function GitView(props: {
     else failures.push(statusResult.reason)
     if (branchResult.status === 'fulfilled') setBranchNames(branchResult.value.names)
     else failures.push(branchResult.reason)
-    if (logResult.status === 'fulfilled') {
-      logEntriesRef.current = logResult.value.entries
-      setLogEntries(logResult.value.entries)
-      updateLogEnded(logResult.value.ended)
-    } else failures.push(logResult.reason)
+    if (logResult.status !== 'fulfilled') failures.push(logResult.reason)
     if (failures.length === 0) {
       setLastRefreshAt(Date.now())
       setError(null)
@@ -225,8 +225,12 @@ export function GitView(props: {
           const historyCount = Math.max(LOG_BATCH, logEntriesRef.current.length)
           const requestCount = logEndedRef.current ? historyCount + 1 : historyCount
           const entries = await api.gitLog(scope, requestCount, 0, controller.signal)
+          if (controller.signal.aborted || generation !== scopeGenerationRef.current) return
           const ended = logEndedRef.current ? entries.length <= historyCount : entries.length < historyCount
-          return { entries: entries.slice(0, historyCount), ended }
+          const window = entries.slice(0, historyCount)
+          logEntriesRef.current = window
+          setLogEntries(window)
+          updateLogEnded(ended)
         }),
       ])
       if (controller.signal.aborted || generation !== scopeGenerationRef.current) return
@@ -236,13 +240,7 @@ export function GitView(props: {
       else failures.push(statusResult.reason)
       if (branchResult.status === 'fulfilled') setBranchNames(branchResult.value.names)
       else failures.push(branchResult.reason)
-      if (logResult.status === 'fulfilled') {
-        // History requests are serialized with load-more, so this window is
-        // always based on the latest committed offset.
-        logEntriesRef.current = logResult.value.entries
-        setLogEntries(logResult.value.entries)
-        updateLogEnded(logResult.value.ended)
-      } else failures.push(logResult.reason)
+      if (logResult.status !== 'fulfilled') failures.push(logResult.reason)
       if (failures.length === 0) {
         setError(null)
         setLastRefreshAt(Date.now())
@@ -289,19 +287,16 @@ export function GitView(props: {
     setLogLoadingMore(true)
     const generation = scopeGenerationRef.current
     try {
-      const { next, offset } = await enqueueHistory(async () => {
+      await enqueueHistory(async () => {
         const offset = logEntriesRef.current.length
         const next = await api.gitLog(scope, LOG_BATCH, offset)
-        return { next, offset }
-      })
-      if (generation !== scopeGenerationRef.current) return
-      setLogEntries(entries => {
-        if (logEntriesRef.current.length !== offset) return entries
-        const merged = [...entries, ...next]
+        if (generation !== scopeGenerationRef.current) return
+        if (logEntriesRef.current.length !== offset) return
+        const merged = [...logEntriesRef.current, ...next]
         logEntriesRef.current = merged
-        return merged
+        setLogEntries(merged)
+        if (next.length < LOG_BATCH) updateLogEnded(true)
       })
-      if (next.length < LOG_BATCH) updateLogEnded(true)
     } catch (reason) {
       if (generation === scopeGenerationRef.current) {
         setCommitError(`${t('historyLoadError')}: ${reason instanceof Error ? reason.message : String(reason)}`)

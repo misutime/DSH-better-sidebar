@@ -27,6 +27,12 @@ function entry(hash: string, subject: string) {
   }
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(value => { resolve = value })
+  return { promise, resolve }
+}
+
 describe('GitView automatic refresh', () => {
   let root: Root | undefined
   let container: HTMLDivElement | undefined
@@ -153,6 +159,46 @@ describe('GitView automatic refresh', () => {
 
     expect(mocks.gitLog.mock.calls[2]?.[1]).toBe(21)
     expect(container.textContent).not.toContain('Load more')
+  })
+
+  it('commits a fast poll history window before a slow status response can race load-more', async () => {
+    vi.useFakeTimers()
+    const page = Array.from({ length: 20 }, (_, index) => entry(`a${index}`, `A commit ${index}`))
+    const more = Array.from({ length: 20 }, (_, index) => entry(`more${index}`, `More commit ${index}`))
+    const slowStatus = deferred<{ isRepo: boolean; branch: string; entries: never[] }>()
+    mocks.gitStatus.mockResolvedValueOnce({ isRepo: true, branch: 'main', entries: [] })
+      .mockReturnValueOnce(slowStatus.promise)
+    mocks.gitBranch.mockResolvedValue({ current: 'main', names: ['main'] })
+    mocks.gitLog
+      .mockResolvedValueOnce(page)
+      .mockResolvedValueOnce(page)
+      .mockResolvedValueOnce(more)
+
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => {
+      root!.render(createElement(GitView, {
+        scope: { sessionId: 's1', cwd: '/repo' },
+        visible: true,
+        onOpenFile: () => {},
+        onOpenDiff: () => {},
+      }))
+    })
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
+    const loadMore = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent?.includes('Load more'))
+    expect(loadMore).toBeDefined()
+    await act(async () => { (loadMore as HTMLButtonElement).click() })
+    expect(mocks.gitLog.mock.calls[2]).toEqual([{ sessionId: 's1', cwd: '/repo' }, 20, 20])
+
+    await act(async () => {
+      slowStatus.resolve({ isRepo: true, branch: 'main', entries: [] })
+      await Promise.resolve()
+    })
+
+    expect(container.textContent).toContain('More commit 0')
   })
 
   it('does not advance the refresh timestamp when a data category fails', async () => {
