@@ -75,9 +75,112 @@ describe('GitView automatic refresh', () => {
     expect(container.querySelector('select')?.textContent).toContain('feature/next')
     expect(mocks.gitLog.mock.calls[1]).toEqual([
       { sessionId: 's1', cwd: '/repo' },
-      20,
+      21,
       0,
       expect.any(AbortSignal),
     ])
+  })
+
+  it('resets the loaded history window when switching sessions', async () => {
+    const firstPage = Array.from({ length: 20 }, (_, index) => entry(`a${index}`, `A commit ${index}`))
+    const secondPage = Array.from({ length: 20 }, (_, index) => entry(`a-more-${index}`, `A more ${index}`))
+    mocks.gitStatus.mockResolvedValue({ isRepo: true, branch: 'main', entries: [] })
+    mocks.gitBranch.mockResolvedValue({ current: 'main', names: ['main'] })
+    mocks.gitLog
+      .mockResolvedValueOnce(firstPage)
+      .mockResolvedValueOnce(secondPage)
+      .mockResolvedValueOnce([entry('b1', 'B commit')])
+
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => {
+      root!.render(createElement(GitView, {
+        scope: { sessionId: 'session-a', cwd: '/repo-a' },
+        visible: true,
+        onOpenFile: () => {},
+        onOpenDiff: () => {},
+      }))
+    })
+
+    const loadMore = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent?.includes('Load more'))
+    expect(loadMore).toBeDefined()
+    await act(async () => { (loadMore as HTMLButtonElement).click() })
+    expect(mocks.gitLog.mock.calls[1]).toEqual([{ sessionId: 'session-a', cwd: '/repo-a' }, 20, 20])
+
+    await act(async () => {
+      root!.render(createElement(GitView, {
+        scope: { sessionId: 'session-b', cwd: '/repo-b' },
+        visible: true,
+        onOpenFile: () => {},
+        onOpenDiff: () => {},
+      }))
+    })
+
+    expect(mocks.gitLog.mock.calls[2]).toEqual([{ sessionId: 'session-b', cwd: '/repo-b' }, 20, 0])
+    expect(container.textContent).toContain('B commit')
+    expect(container.textContent).not.toContain('A commit 0')
+  })
+
+  it('keeps the end-of-history state after an empty page and a later poll', async () => {
+    vi.useFakeTimers()
+    const page = Array.from({ length: 20 }, (_, index) => entry(`a${index}`, `A commit ${index}`))
+    mocks.gitStatus.mockResolvedValue({ isRepo: true, branch: 'main', entries: [] })
+    mocks.gitBranch.mockResolvedValue({ current: 'main', names: ['main'] })
+    mocks.gitLog
+      .mockResolvedValueOnce(page)
+      .mockResolvedValueOnce([])
+      .mockResolvedValue(page)
+
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => {
+      root!.render(createElement(GitView, {
+        scope: { sessionId: 's1', cwd: '/repo' },
+        visible: true,
+        onOpenFile: () => {},
+        onOpenDiff: () => {},
+      }))
+    })
+    const loadMore = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent?.includes('Load more'))
+    await act(async () => { (loadMore as HTMLButtonElement).click() })
+    expect(container.textContent).not.toContain('Load more')
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
+
+    expect(mocks.gitLog.mock.calls[2]?.[1]).toBe(21)
+    expect(container.textContent).not.toContain('Load more')
+  })
+
+  it('does not advance the refresh timestamp when a data category fails', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+    mocks.gitStatus.mockResolvedValue({ isRepo: true, branch: 'main', entries: [] })
+    mocks.gitBranch
+      .mockResolvedValueOnce({ current: 'main', names: ['main'] })
+      .mockRejectedValue(new Error('branch unavailable'))
+    mocks.gitLog.mockResolvedValue([entry('a1', 'A commit')])
+
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => {
+      root!.render(createElement(GitView, {
+        scope: { sessionId: 's1', cwd: '/repo' },
+        visible: true,
+        onOpenFile: () => {},
+        onOpenDiff: () => {},
+      }))
+    })
+    expect(container.querySelector('[class*="gitLastRefresh"]')?.textContent).toContain('0 seconds ago')
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000)
+    })
+
+    expect(container.querySelector('[class*="gitLastRefresh"]')?.textContent).toContain('5 seconds ago')
   })
 })

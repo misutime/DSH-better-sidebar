@@ -105,6 +105,11 @@ export function GitView(props: {
   /** Whether the history was fully paged (a batch shorter than LOG_BATCH). */
   const [logEnded, setLogEnded] = useState(false)
   const [logLoadingMore, setLogLoadingMore] = useState(false)
+  const logEndedRef = useRef(false)
+  const updateLogEnded = (ended: boolean): void => {
+    logEndedRef.current = ended
+    setLogEnded(ended)
+  }
   /** Wall-clock time of the most recent successful data refresh. */
   const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null)
   /** Re-render the relative-time label while the Git page is visible. */
@@ -114,6 +119,18 @@ export function GitView(props: {
   const logEntriesRef = useRef<GitLogEntry[]>([])
   /** In-flight auto-refresh abort handle (cancelled on unmount/hide). */
   const pollAbortRef = useRef<AbortController | null>(null)
+  /** Reject stale responses when the Git scope changes without remounting. */
+  const scopeGenerationRef = useRef(0)
+  /** Serialize history refreshes and pagination so offset windows cannot cross. */
+  const historyQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const logLoadingMoreRef = useRef(false)
+
+  /** Run one history request after all earlier history requests settle. */
+  const enqueueHistory = <T,>(task: () => Promise<T>): Promise<T> => {
+    const current = historyQueueRef.current.catch(() => undefined).then(task)
+    historyQueueRef.current = current.then(() => undefined, () => undefined)
+    return current
+  }
 
   /** The open file-row context menu (cursor position for the portaled Menu). */
   const [fileMenu, setFileMenu] = useState<{ entry: GitStatusEntry; staged: boolean; x: number; y: number } | null>(null)
@@ -129,26 +146,53 @@ export function GitView(props: {
     // slower poll could finish afterwards and put stale history back on screen.
     pollAbortRef.current?.abort()
     pollAbortRef.current = null
+    const generation = scopeGenerationRef.current
     setLoading(true)
     setError(null)
-    try {
-      const historyCount = Math.max(LOG_BATCH, logEntriesRef.current.length)
-      const [statusResult, branchResult, logResult] = await Promise.all([
-        api.gitStatus(scope),
-        api.gitBranch(scope).catch(() => ({ current: '', names: [] as string[] })),
-        api.gitLog(scope, historyCount, 0).catch(() => [] as GitLogEntry[]),
-      ])
-      setStatus(statusResult)
-      setBranchNames(branchResult.names)
-      logEntriesRef.current = logResult
-      setLogEntries(logResult)
-      setLogEnded(logResult.length < historyCount)
+    const results = await Promise.allSettled([
+      api.gitStatus(scope),
+      api.gitBranch(scope),
+      enqueueHistory(async () => {
+        const historyCount = Math.max(LOG_BATCH, logEntriesRef.current.length)
+        const requestCount = logEndedRef.current ? historyCount + 1 : historyCount
+        const entries = await api.gitLog(scope, requestCount, 0)
+        const ended = logEndedRef.current ? entries.length <= historyCount : entries.length < historyCount
+        return { entries: entries.slice(0, historyCount), ended }
+      }),
+    ])
+    if (generation !== scopeGenerationRef.current) return
+    const [statusResult, branchResult, logResult] = results
+    const failures: unknown[] = []
+    if (statusResult.status === 'fulfilled') setStatus(statusResult.value)
+    else failures.push(statusResult.reason)
+    if (branchResult.status === 'fulfilled') setBranchNames(branchResult.value.names)
+    else failures.push(branchResult.reason)
+    if (logResult.status === 'fulfilled') {
+      logEntriesRef.current = logResult.value.entries
+      setLogEntries(logResult.value.entries)
+      updateLogEnded(logResult.value.ended)
+    } else failures.push(logResult.reason)
+    if (failures.length === 0) {
       setLastRefreshAt(Date.now())
-    } catch (reason) {
+      setError(null)
+    } else {
+      const reason = failures[0]
       setError(reason instanceof Error ? reason.message : String(reason))
-    } finally {
-      setLoading(false)
     }
+    setLoading(false)
+  }, [scope.sessionId, scope.cwd])
+
+  useEffect(() => {
+    scopeGenerationRef.current += 1
+    pollAbortRef.current?.abort()
+    pollAbortRef.current = null
+    logEntriesRef.current = []
+    setStatus(null)
+    setBranchNames([])
+    setLogEntries([])
+    updateLogEnded(false)
+    setLastRefreshAt(null)
+    setError(null)
   }, [scope.sessionId, scope.cwd])
 
   useEffect(() => { void refresh() }, [refresh])
@@ -168,35 +212,44 @@ export function GitView(props: {
    * (no per-tick cancellation that would starve a slow repo).
    */
   const pollGit = useCallback(async (): Promise<void> => {
-    if (busy || loading) return
+    if (busy || loading || logLoadingMoreRef.current) return
     const controller = new AbortController()
     pollAbortRef.current = controller
-    const loadedHistoryCount = logEntriesRef.current.length
-    const historyCount = Math.max(LOG_BATCH, loadedHistoryCount)
+    const generation = scopeGenerationRef.current
     try {
-      const [statusResult, branchResult, logResult] = await Promise.all([
+      const results = await Promise.allSettled([
         api.gitStatus(scope, controller.signal),
-        api.gitBranch(scope, controller.signal).catch(() => ({ current: '', names: [] as string[] })),
-        // Keep the number of already visible rows so "load more" remains
-        // stable while still replacing the newest rows after external commits.
-        api.gitLog(scope, historyCount, 0, controller.signal).catch(() => null),
+        api.gitBranch(scope, controller.signal),
+        enqueueHistory(async () => {
+          if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError')
+          const historyCount = Math.max(LOG_BATCH, logEntriesRef.current.length)
+          const requestCount = logEndedRef.current ? historyCount + 1 : historyCount
+          const entries = await api.gitLog(scope, requestCount, 0, controller.signal)
+          const ended = logEndedRef.current ? entries.length <= historyCount : entries.length < historyCount
+          return { entries: entries.slice(0, historyCount), ended }
+        }),
       ])
-      if (controller.signal.aborted) return
-      setStatus(statusResult)
-      setBranchNames(branchResult.names)
-      // If "load more" finished while this poll was in flight, do not let
-      // the older, shorter window erase the newly appended page.
-      if (logResult !== null && logEntriesRef.current.length === loadedHistoryCount) {
-        logEntriesRef.current = logResult
-        setLogEntries(logResult)
-        setLogEnded(logResult.length < historyCount)
+      if (controller.signal.aborted || generation !== scopeGenerationRef.current) return
+      const [statusResult, branchResult, logResult] = results
+      const failures: unknown[] = []
+      if (statusResult.status === 'fulfilled') setStatus(statusResult.value)
+      else failures.push(statusResult.reason)
+      if (branchResult.status === 'fulfilled') setBranchNames(branchResult.value.names)
+      else failures.push(branchResult.reason)
+      if (logResult.status === 'fulfilled') {
+        // History requests are serialized with load-more, so this window is
+        // always based on the latest committed offset.
+        logEntriesRef.current = logResult.value.entries
+        setLogEntries(logResult.value.entries)
+        updateLogEnded(logResult.value.ended)
+      } else failures.push(logResult.reason)
+      if (failures.length === 0) {
+        setError(null)
+        setLastRefreshAt(Date.now())
+      } else {
+        const reason = failures[0]
+        setError(reason instanceof Error ? reason.message : String(reason))
       }
-      setError(null)
-      setLastRefreshAt(Date.now())
-    } catch (reason) {
-      // Aborted polls are expected on hide/unmount — never surface them.
-      if (controller.signal.aborted) return
-      setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
       if (pollAbortRef.current === controller) pollAbortRef.current = null
     }
@@ -231,19 +284,30 @@ export function GitView(props: {
 
   /** Append the next history page (lazy: only when the user asks for more). */
   const loadMoreLog = async (): Promise<void> => {
-    if (logLoadingMore || logEnded) return
+    if (logLoadingMore || logLoadingMoreRef.current || logEnded) return
+    logLoadingMoreRef.current = true
     setLogLoadingMore(true)
+    const generation = scopeGenerationRef.current
     try {
-      const next = await api.gitLog(scope, LOG_BATCH, logEntriesRef.current.length)
+      const { next, offset } = await enqueueHistory(async () => {
+        const offset = logEntriesRef.current.length
+        const next = await api.gitLog(scope, LOG_BATCH, offset)
+        return { next, offset }
+      })
+      if (generation !== scopeGenerationRef.current) return
       setLogEntries(entries => {
+        if (logEntriesRef.current.length !== offset) return entries
         const merged = [...entries, ...next]
         logEntriesRef.current = merged
         return merged
       })
-      if (next.length < LOG_BATCH) setLogEnded(true)
+      if (next.length < LOG_BATCH) updateLogEnded(true)
     } catch (reason) {
-      setCommitError(`${t('historyLoadError')}: ${reason instanceof Error ? reason.message : String(reason)}`)
+      if (generation === scopeGenerationRef.current) {
+        setCommitError(`${t('historyLoadError')}: ${reason instanceof Error ? reason.message : String(reason)}`)
+      }
     } finally {
+      logLoadingMoreRef.current = false
       setLogLoadingMore(false)
     }
   }
