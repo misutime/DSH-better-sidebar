@@ -14,6 +14,7 @@ export const zh = {
   files: '文件',
   explorer: '资源管理器',
   git: '源代码管理',
+  gitLastRefresh: '更新于 {time}',
   terminal: '终端',
   editor: '编辑器',
   editorExplorer: '文件打开方式',
@@ -106,6 +107,10 @@ export const zh = {
   cherryPickTitle: '捡取此提交',
   cherryPickDesc: '将「{subject}」的更改应用到当前分支。',
   timeJustNow: '刚刚',
+  timeSecondsAgoExact: '{n} 秒前',
+  timeMinutesAgoExact: '{n} 分钟前',
+  timeHoursAgoExact: '{n} 小时前',
+  timeDaysAgoExact: '{n} 天前',
   timeMinutesAgo: '{n} 分钟前',
   timeHoursAgo: '{n} 小时前',
   timeYesterday: '昨天',
@@ -218,6 +223,7 @@ export const zh = {
   subagentDiagUnsupported: '不支持的条目',
   subagentDiagUnavailable: '不可用',
   subagentThinking: '思考中…',
+  subagentModel: '模型：{model}',
   jobs: '后台任务',
   jobsCount: '{count} 个后台任务',
   jobsCountRunning: '{count} 个后台任务 · {running} 运行中',
@@ -261,6 +267,7 @@ export const en: Record<keyof typeof zh, string> = {
   files: 'Files',
   explorer: 'Explorer',
   git: 'Source Control',
+  gitLastRefresh: 'Updated {time}',
   terminal: 'Terminal',
   editor: 'Editor',
   editorExplorer: 'File open behavior',
@@ -353,6 +360,10 @@ export const en: Record<keyof typeof zh, string> = {
   cherryPickTitle: 'Cherry-pick commit',
   cherryPickDesc: 'Apply the changes of "{subject}" to the current branch.',
   timeJustNow: 'just now',
+  timeSecondsAgoExact: '{n} seconds ago',
+  timeMinutesAgoExact: '{n} min ago',
+  timeHoursAgoExact: '{n} h ago',
+  timeDaysAgoExact: '{n} d ago',
   timeMinutesAgo: '{n} min ago',
   timeHoursAgo: '{n} h ago',
   timeYesterday: 'yesterday',
@@ -465,6 +476,7 @@ export const en: Record<keyof typeof zh, string> = {
   subagentDiagUnsupported: 'Unsupported',
   subagentDiagUnavailable: 'Unavailable',
   subagentThinking: 'Thinking…',
+  subagentModel: 'Model: {model}',
   jobs: 'Background jobs',
   jobsCount: '{count} background jobs',
   jobsCountRunning: '{count} background jobs · {running} running',
@@ -565,4 +577,17 @@ export function relativeTime(iso: string): string {
   const date = new Date(then)
   const pad = (value: number): string => String(value).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
+/** Format elapsed time with explicit seconds/minutes/hours/days units. */
+export function elapsedTime(iso: string): string {
+  const then = Date.parse(iso)
+  if (Number.isNaN(then)) return iso
+  const seconds = Math.max(0, Math.floor((Date.now() - then) / 1000))
+  if (seconds < 60) return t('timeSecondsAgoExact', { n: seconds })
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return t('timeMinutesAgoExact', { n: minutes })
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return t('timeHoursAgoExact', { n: hours })
+  return t('timeDaysAgoExact', { n: Math.floor(hours / 24) })
 }

@@ -239,6 +239,13 @@ export interface SidebarRpcResponse<T> {
 /** The wire face the Subagent activity summary needs (subset of `ctx.connection`). */
 export interface SidebarConnectionHandle {
   api: {
+    /** History for ordinary sessions, used for the main-agent model label. */
+    sessions?: {
+      history(
+        payload: { sessionId: string; beforeSeq?: number; maxMessages?: number },
+        signal?: AbortSignal,
+      ): Promise<SidebarRpcResponse<{ events: SidebarHistoryEntry[]; hasMore: boolean }>>
+    }
     subagents: {
       history(
         payload: SidebarSubagentAddress & { beforeSeq?: number; maxMessages?: number },
